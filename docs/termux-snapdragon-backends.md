@@ -83,10 +83,11 @@ The deployed service consists of:
 - `~/.local/opt/koboldcpp-snapdragon/koboldcpp_default.so` (the combined Snapdragon library)
 - `~/.local/opt/koboldcpp-snapdragon/libc++_shared.so`
 - `~/.local/opt/koboldcpp-snapdragon/embd_res/klite.embd` (KoboldAI Lite UI)
+- `~/.config/koboldcpp/gemma4-e4b-opencl.kcpps` (model and inference settings)
 - `~/.local/bin/koboldcpp-snapdragon-run`
 - `~/.local/bin/koboldcpp-snapdragon-service`
 
-The runner contains the runtime-isolation contract and supports `KCPP_DEVICE=cpu`, `opencl`, or `htp`. Its default is the tested Gemma 4 E4B configuration: `opencl` with all 43 model layers offloaded. The service manager supports `start`, `stop`, `restart`, `status`, and `log`; its PID and log live under `~/.local/state/koboldcpp-snapdragon/`. It uses `nohup` so the service survives the SSH session, and the runner forwards termination to the Python server and releases its Termux wake lock.
+The runner contains only the runtime-isolation contract and loads settings from the `.kcpps` file. `KCPP_CONFIG` may select another `.kcpps` profile. The default profile runs Gemma 4 E4B with a 16,384-token context on `GPUOpenCL`, with all 43 model layers offloaded. The service manager supports `start`, `stop`, `restart`, `status`, and `log`; its PID and log live under `~/.local/state/koboldcpp-snapdragon/`. It uses `nohup` so the service survives the SSH session, and the runner forwards termination to the Python server and releases its Termux wake lock.
 
 The installed combined service was verified through the HTTP API on all relevant paths:
 
@@ -95,7 +96,7 @@ The installed combined service was verified through the HTTP API on all relevant
 - Preferred E4B: the service loaded the abliterated E4B model with `GPUOpenCL`, identified the physical `QUALCOMM Adreno(TM) 840`, and reported `offloaded 43/43 layers to GPU`. `/api/v1/generate` returned HTTP 200 with `FULL_OFFLOAD_OK`.
 - KoboldAI Lite: `/` returned HTTP 200 with the complete 1,759,957-byte embedded UI.
 
-The persistent instance listens only on `127.0.0.1:5001` and defaults to full E4B offload on Adreno OpenCL. The fixed-output API smoke test proves launchability, full layer placement, and basic deterministic generation; it does not by itself establish broad model-quality equivalence.
+The persistent instance listens only on `127.0.0.1:5001`; its `.kcpps` profile sets a 16,384-token context and full E4B offload on Adreno OpenCL. The fixed-output API smoke test proves launchability, full layer placement, and basic deterministic generation; it does not by itself establish broad model-quality equivalence.
 
 ## HTP proof
 
