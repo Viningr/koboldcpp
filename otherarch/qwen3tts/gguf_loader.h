@@ -72,6 +72,7 @@ bool load_tensor_data_from_file(
     const std::map<std::string, struct ggml_tensor *> & tensors,
     ggml_backend_buffer_t & buffer,
     std::string & error_msg,
+    const char * component_name,
     bool allowgpu
 );
 

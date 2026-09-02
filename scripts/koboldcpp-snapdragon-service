@@ -1,0 +1,63 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+STATE="${KCPP_STATE:-$HOME/.local/state/koboldcpp-snapdragon}"
+PIDFILE="$STATE/server.pid"
+LOGFILE="$STATE/server.log"
+RUNNER="${KCPP_RUNNER:-$HOME/.local/bin/koboldcpp-snapdragon-run}"
+mkdir -p "$STATE"
+
+running_pid() {
+    [ -s "$PIDFILE" ] || return 1
+    pid="$(cat "$PIDFILE")"
+    kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s\n' "$pid"
+}
+
+case "${1:-status}" in
+    start)
+        if pid="$(running_pid)"; then
+            printf 'already running pid=%s\n' "$pid"
+            exit 0
+        fi
+        rm -f "$PIDFILE"
+        : > "$LOGFILE"
+        nohup "$RUNNER" >"$LOGFILE" 2>&1 </dev/null &
+        pid=$!
+        printf '%s\n' "$pid" > "$PIDFILE"
+        printf 'started pid=%s log=%s\n' "$pid" "$LOGFILE"
+        ;;
+    stop)
+        if pid="$(running_pid)"; then
+            kill "$pid"
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 1
+            done
+            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+            printf 'stopped pid=%s\n' "$pid"
+        else
+            printf 'not running\n'
+        fi
+        rm -f "$PIDFILE"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    status)
+        if pid="$(running_pid)"; then
+            printf 'running pid=%s\n' "$pid"
+            exit 0
+        fi
+        printf 'stopped\n'
+        exit 1
+        ;;
+    log)
+        exec tail -n "${2:-120}" "$LOGFILE"
+        ;;
+    *)
+        printf 'usage: %s {start|stop|restart|status|log [lines]}\n' "$0" >&2
+        exit 2
+        ;;
+esac

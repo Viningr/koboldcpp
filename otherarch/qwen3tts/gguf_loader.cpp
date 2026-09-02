@@ -1,6 +1,7 @@
 #include "gguf_loader.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 
@@ -18,9 +19,24 @@ struct shared_backend_state {
     int32_t ref_count = 0;
 };
 
-shared_backend_state & get_shared_backend_state() {
-    static shared_backend_state state;
-    return state;
+std::map<std::string, shared_backend_state> & get_shared_backend_states() {
+    static std::map<std::string, shared_backend_state> states;
+    return states;
+}
+
+const char * get_requested_backend(const char * component_name) {
+    const char * specific = nullptr;
+    if (component_name && std::strcmp(component_name, "TTSTransformer") == 0) {
+        specific = std::getenv("QWEN3_TTS_TRANSFORMER_BACKEND");
+    } else if (component_name && std::strcmp(component_name, "AudioTokenizerDecoder") == 0) {
+        specific = std::getenv("QWEN3_TTS_DECODER_BACKEND");
+    } else if (component_name && std::strcmp(component_name, "AudioTokenizerEncoder") == 0) {
+        specific = std::getenv("QWEN3_TTS_ENCODER_BACKEND");
+    }
+    if (specific && specific[0] != '\0') {
+        return specific;
+    }
+    return std::getenv("QWEN3_TTS_BACKEND");
 }
 }
 
@@ -33,13 +49,29 @@ GGUFLoader::~GGUFLoader() {
 ggml_backend_t init_preferred_backend(const char * component_name, std::string * error_msg, bool allow_gpu) {
     if (error_msg) error_msg->clear();
 
-    auto & shared = get_shared_backend_state();
+    const char * requested_backend = get_requested_backend(component_name);
+    const std::string backend_key = requested_backend && requested_backend[0] != '\0' ? requested_backend : "__auto__";
+    auto & shared = get_shared_backend_states()[backend_key];
     if (shared.backend) {
         shared.ref_count++;
         return shared.backend;
     }
 
-    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+    ggml_backend_t backend = nullptr;
+    if (requested_backend && requested_backend[0] != '\0') {
+        backend = ggml_backend_init_by_name(requested_backend, nullptr);
+        if (!backend) {
+            if (error_msg) {
+                const char * name = component_name ? component_name : "component";
+                *error_msg = "Failed to initialize requested backend '" + std::string(requested_backend) + "' for " + std::string(name);
+            }
+            return nullptr;
+        }
+    }
+
+    if (!backend) {
+        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+    }
     if(allow_gpu)
     {
     if (!backend) {
@@ -71,15 +103,18 @@ void release_preferred_backend(ggml_backend_t backend) {
         return;
     }
 
-    auto & shared = get_shared_backend_state();
-    if (shared.backend == backend) {
-        shared.ref_count--;
-        if (shared.ref_count <= 0) {
-            ggml_backend_free(shared.backend);
-            shared.backend = nullptr;
-            shared.ref_count = 0;
+    auto & states = get_shared_backend_states();
+    for (auto & entry : states) {
+        auto & shared = entry.second;
+        if (shared.backend == backend) {
+            shared.ref_count--;
+            if (shared.ref_count <= 0) {
+                ggml_backend_free(shared.backend);
+                shared.backend = nullptr;
+                shared.ref_count = 0;
+            }
+            return;
         }
-        return;
     }
 
     ggml_backend_free(backend);
@@ -167,9 +202,10 @@ bool load_tensor_data_from_file(
     const std::map<std::string, struct ggml_tensor *> & tensors,
     ggml_backend_buffer_t & buffer,
     std::string & error_msg,
+    const char * component_name,
     bool allowgpu
 ) {
-    ggml_backend_t backend = init_preferred_backend("TensorLoader", &error_msg, allowgpu);
+    ggml_backend_t backend = init_preferred_backend(component_name, &error_msg, allowgpu);
 
     if (!backend) {
         error_msg = "Failed to initialize backend for GGUF tensor loader";

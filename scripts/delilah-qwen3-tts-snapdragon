@@ -1,0 +1,61 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: %s --text-file INPUT --out OUTPUT\n' "$0" >&2
+}
+
+input=''
+output=''
+while (($#)); do
+  case "$1" in
+    --text-file)
+      (($# >= 2)) || { usage; exit 2; }
+      input=$2
+      shift 2
+      ;;
+    --out)
+      (($# >= 2)) || { usage; exit 2; }
+      output=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unknown argument: %s\n' "$1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[[ -n "$input" && -f "$input" && -n "$output" ]] || { usage; exit 2; }
+
+root="$HOME/.local/opt/koboldcpp-snapdragon-test"
+htp="$HOME/.local/opt/llama-htp-sm8850/lib"
+model="$HOME/.local/share/qwen3-tts/selected-q5k-mxfp4"
+text=$(<"$input")
+[[ -n "$text" ]] || { printf 'Input text is empty\n' >&2; exit 2; }
+mkdir -p "$(dirname "$output")" "$HOME/.cache/koboldcpp/opencl"
+
+env \
+  LD_LIBRARY_PATH="$root:$PREFIX/opt/vendor/lib:$htp" \
+  ADSP_LIBRARY_PATH="$htp" \
+  GGML_HEXAGON_DEVICES='HTP0:0' \
+  GGML_HEXAGON_HOSTBUF=0 \
+  GGML_OPENCL_KERNEL_CACHE_DIR="$HOME/.cache/koboldcpp/opencl" \
+  QWEN3_TTS_TRANSFORMER_BACKEND=CPU \
+  QWEN3_TTS_DECODER_BACKEND=GPUOpenCL \
+  QWEN3_TTS_ENCODER_BACKEND=CPU \
+  "$root/qwen3ttssnapdragon" \
+    -m "$model" \
+    -t "$text" \
+    -o "$output" \
+    --temperature 0 \
+    --top-k 0 \
+    --max-tokens "${QWEN3_TTS_MAX_TOKENS:-1024}" \
+    -j "${QWEN3_TTS_THREADS:-4}"
+
+test -s "$output"

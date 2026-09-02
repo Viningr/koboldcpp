@@ -249,7 +249,8 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
     }
 
     if (!load_tensor_data_from_file(model_path, gguf_ctx, model_.ctx,
-                                     model_.tensors, model_.buffer, error_msg_, qwen3tts_allowgpu)) {
+                                     model_.tensors, model_.buffer, error_msg_,
+                                     "AudioTokenizerEncoder", qwen3tts_allowgpu)) {
         return false;
     }
 

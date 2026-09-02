@@ -57,6 +57,10 @@ models-mnt
 /lookahead
 /lookup
 /main
+/mainopencl
+/mainhexagon
+/mainsnapdragon
+/qwen3ttssnapdragon
 /metal
 /passkey
 /perplexity
@@ -131,6 +135,8 @@ tests/test-tokenizer-1-bpe
 /tests/test-backend-ops
 
 /koboldcpp_default.so
+/koboldcpp_snapdragon.so
+/android-opencl-stub/libOpenCL.so
 /koboldcpp_failsafe.so
 /koboldcpp_noavx2.so
 /koboldcpp_vulkan_failsafe.so

@@ -1,0 +1,68 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+ROOT="${KCPP_ROOT:-$HOME/.local/opt/koboldcpp-snapdragon}"
+HTP_ROOT="${KCPP_HTP_ROOT:-$HOME/.local/opt/llama-htp-sm8850}"
+MODEL="${KCPP_MODEL:-$HOME/.local/share/models/gemma4-e4b/Huihui-gemma-4-E4B-it-qat-q4_0-unquantized-abliterated.i1-Q4_0.gguf}"
+DEVICE="${KCPP_DEVICE:-opencl}"
+GPU_LAYERS="${KCPP_GPU_LAYERS:-43}"
+HOST="${KCPP_HOST:-127.0.0.1}"
+PORT="${KCPP_PORT:-5001}"
+CONTEXT="${KCPP_CONTEXT:-512}"
+THREADS="${KCPP_THREADS:-4}"
+BATCH="${KCPP_BATCH:-64}"
+
+[ -r "$MODEL" ] || { printf 'Model not readable: %s\n' "$MODEL" >&2; exit 2; }
+[ -r "$ROOT/koboldcpp_default.so" ] || { printf 'Runtime not readable: %s\n' "$ROOT/koboldcpp_default.so" >&2; exit 2; }
+
+mkdir -p "$HOME/.cache/koboldcpp/opencl"
+export LD_LIBRARY_PATH="$ROOT:$PREFIX/opt/vendor/lib:$HTP_ROOT/lib"
+export ADSP_LIBRARY_PATH="$HTP_ROOT/lib"
+export GGML_HEXAGON_DEVICES="${GGML_HEXAGON_DEVICES:-HTP0:0}"
+export GGML_HEXAGON_HOSTBUF="${GGML_HEXAGON_HOSTBUF:-0}"
+export GGML_OPENCL_KERNEL_CACHE_DIR="$HOME/.cache/koboldcpp/opencl"
+
+backend_args=()
+case "$DEVICE" in
+    cpu)
+        backend_args=(--usecpu --gpulayers 0)
+        ;;
+    opencl)
+        backend_args=(--device GPUOpenCL --gpulayers "$GPU_LAYERS")
+        ;;
+    htp)
+        backend_args=(--device HTP0:0 --gpulayers "$GPU_LAYERS")
+        ;;
+    *)
+        printf 'KCPP_DEVICE must be cpu, opencl, or htp (got %s)\n' "$DEVICE" >&2
+        exit 2
+        ;;
+esac
+
+termux-wake-lock 2>/dev/null || true
+child_pid=""
+cleanup() {
+    trap - EXIT INT TERM
+    if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+        kill "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+    fi
+    termux-wake-unlock 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+cd "$ROOT"
+python "$ROOT/koboldcpp.py" \
+    --skiplauncher \
+    --singleinstance \
+    --host "$HOST" \
+    --port "$PORT" \
+    --model "$MODEL" \
+    --contextsize "$CONTEXT" \
+    --threads "$THREADS" \
+    --batchsize "$BATCH" \
+    --quantkv q8_0 \
+    "${backend_args[@]}" \
+    "$@" &
+child_pid=$!
+wait "$child_pid"
+child_pid=""
