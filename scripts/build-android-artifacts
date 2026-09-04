@@ -14,6 +14,7 @@ ROOT_NATIVE="$(cd "$ROOT" && pwd -W 2>/dev/null || pwd)"
 
 docker run --rm \
     -e "BUILD_JOBS=${BUILD_JOBS:-8}" \
+    -e "BUILD_CLEAN=${BUILD_CLEAN:-1}" \
     -e "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" \
     -e "ANDROID_API=$ANDROID_API" \
     -e "HEXAGON_SDK_ROOT=$HEXAGON_SDK_ROOT" \

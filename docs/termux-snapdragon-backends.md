@@ -33,7 +33,7 @@ scripts/build-android-artifacts
 BUILD_JOBS=4 scripts/build-android-artifacts koboldcpp_snapdragon
 ```
 
-The host script mounts the current Git worktree at `/src`; it does not depend on a fixed `C:/repos/...` checkout path. The in-container script validates the NDK compiler, archiver, and Hexagon SDK before running `make clean`. It prints SHA-256 checksums for every requested standard deliverable that exists.
+The host script mounts the current Git worktree at `/src`; it does not depend on a fixed `C:/repos/...` checkout path. The in-container script validates the NDK compiler, archiver, and Hexagon SDK, regenerates the embedded `get_rows.cl` header, invalidates its OpenCL object dependency, and then performs a clean build by default. `BUILD_CLEAN=0` is reserved for bounded diagnostic builds. It prints SHA-256 checksums for every requested standard deliverable that exists.
 The compiled deliverables are:
 
 - `mainsnapdragon`: llama-compatible CLI with CPU, OpenCL, and HTP registered together.
@@ -90,7 +90,7 @@ The deployed service consists of:
 - `~/.local/bin/koboldcpp-snapdragon-run`
 - `~/.local/bin/koboldcpp-snapdragon-service`
 
-The runner contains only the runtime-isolation contract and loads settings from the `.kcpps` file. `KCPP_CONFIG` may select another `.kcpps` profile. The default profile runs Gemma 4 E4B with a 16,384-token context on `GPUOpenCL`, with all 43 model layers offloaded. It loads the proven `whisper-base.en-f16.bin` in the embedded STT slot and `Kokoro_no_espeak_Q4.gguf` in the TTS slot; `embd_res/kokoro_ipa.embd` must be installed beside the runtime. The service manager supports `start`, `stop`, `restart`, `status`, and `log`; its PID and log live under `~/.local/state/koboldcpp-snapdragon/`. It uses `nohup` so the service survives the SSH session, and the runner forwards termination to the Python server and releases its Termux wake lock. This is session persistence, not boot persistence: no Termux:Boot, `runit`, shell-startup, or cron entry currently starts KoboldCpp after an Android reboot.
+The runner contains only the runtime-isolation contract and loads settings from the `.kcpps` file. `KCPP_CONFIG` may select another `.kcpps` profile. The default profile runs Gemma 4 E4B with a 16,384-token context on `GPUOpenCL`, with all 43 model layers offloaded. It also loads `whisper-base.en-q5_1.bin` in the embedded STT slot and `Kokoro_no_espeak_Q4.gguf` in the TTS slot; `embd_res/kokoro_ipa.embd` must be installed beside the runtime. The service manager supports `start`, `stop`, `restart`, `status`, and `log`; its PID and log live under `~/.local/state/koboldcpp-snapdragon/`. It uses `nohup` so the service survives the SSH session, and the runner forwards termination to the Python server and releases its Termux wake lock.
 
 The installed combined service was verified through the HTTP API on all relevant paths:
 
@@ -98,25 +98,35 @@ The installed combined service was verified through the HTTP API on all relevant
 - HTP: the same service opened a Hexagon v81 session, enumerated OpenCL/HTP/RPC/CPU, offloaded one layer to `HTP0:0`, and returned HTTP JSON.
 - Preferred E4B: the service loaded the abliterated E4B model with `GPUOpenCL`, identified the physical `QUALCOMM Adreno(TM) 840`, and reported `offloaded 43/43 layers to GPU`. `/api/v1/generate` returned HTTP 200 with `FULL_OFFLOAD_OK`.
 - Embedded TTS: Kokoro Q4 produced a valid mono 24 kHz WAV through `/v1/audio/speech`.
-- Embedded STT: OpenCL Base.en F16 transcribed that WAV through `/v1/audio/transcriptions`; the service remained running after inference.
+- Embedded STT: OpenCL Base.en transcribed that WAV through `/v1/audio/transcriptions`; the service remained running after inference.
 - KoboldAI Lite: `/` returned HTTP 200 with the complete 1,759,957-byte embedded UI.
 
 The persistent instance listens only on `127.0.0.1:5001`; its `.kcpps` profile sets a 16,384-token context and full E4B offload on Adreno OpenCL. The fixed-output API smoke test proves launchability, full layer placement, and basic deterministic generation; it does not by itself establish broad model-quality equivalence.
 
-## Whisper Base.en Q4_0 OpenCL limitation
+### Whisper Base.en Q5_1 OpenCL support
 
-The legacy `ggml-base.en-q4_0.bin` artifact is valid, but it must not be selected in the production Snapdragon build. Controlled tests used the same PCM WAV and model file:
+The embedded OpenCL backend already had Q5_1 upload and matrix kernels, but its Whisper graph reached `GET_ROWS` without a Q5_1 implementation. This branch adds a Q5_1 SOA row-gather kernel for both generic packed tensors and Adreno's transposed/noshuffled layout. The selected physical layout and original two-dimensional geometry are stored with the tensor allocation so views do not recompute layout from their own shapes. The capability check rejects Q5_1 MoE layouts and every Adreno-transposed view that changes the offset, shape, dimensionality, or contiguous physical mapping.
 
-| Backend/build | Result | Elapsed |
-|---|---|---:|
-| CPU | `The hardware speech test day is working.` | 3 s |
-| Production OpenCL, SOA + Adreno kernels | empty transcript | 2 s |
-| OpenCL, SOA + generic kernels | empty transcript | 4 s |
-| Diagnostic OpenCL, AOS + generic kernels | `The hardware speech test day is working.` | 4 s |
+The same normalized WAV produced the expected transcript within two seconds on the physical Adreno 840 with both layouts:
 
-This isolates the semantic failure to the OpenCL struct-of-arrays quantized-weight path enabled by `GGML_OPENCL_SOA_Q`, not the model conversion, HTTP endpoint, Hermes adapter, audio normalization, Qualcomm OpenCL driver, or Adreno-specialized kernels. The response remains valid HTTP JSON (`{"text": ""}`), so Hermes treats it as silence and immediately resumes listening.
+| OpenCL Q5_1 layout | Result |
+|---|---|
+| Adreno transposed/noshuffled SOA | `The Hardware Speech Test Day is working.` |
+| Generic SOA, Adreno kernels disabled | `The Hardware Speech Test Day is working.` |
 
-The diagnostic AOS build required compile guards around SOA-only optimized code and is not a production replacement: disabling SOA globally also changes the quantized Gemma path. Keep Whisper Base.en F16 active until the Q4_0 SOA upload/layout path is corrected and validated without regressing Gemma.
+The clean production artifact is `koboldcpp_snapdragon.so` with SHA-256 `fc4f51433b5dceb7e727bd21b3caeadf5ac8f23f9c55e40d224cc0ad04b4b303`.
+
+The deterministic regression test covers generic and transposed Q5_1 packing, rejects incompatible transposed view geometry, and verifies that the embedded generated header matches `get_rows.cl`.
+
+The combined candidate profile passed on the Fold in one resident process:
+
+- profile context `16384`, `GPUOpenCL`, and Gemma `43/43` layer offload;
+- Q5_1 direct STT and the Hermes STT adapter both returned `The Hardware Speech Test Day is working.`;
+- the Hermes Kokoro adapter generated a valid mono 24 kHz, 16-bit WAV with `af_heart`;
+- the Gemma generation endpoint returned non-empty JSON;
+- API postflight and process-survival checks passed.
+
+After owner approval, the verified artifact and profile were promoted atomically to the canonical service paths. The final production service repeated the direct Q5_1 STT, Hermes STT adapter, Kokoro `af_heart`, Gemma generation, `43/43` offload, installed-hash, and API-health checks successfully. The pre-promotion F16 binary and profile are preserved under `~/.local/state/koboldcpp-snapdragon/pre-q5_1-20260904-222656/`.
 
 ## HTP proof
 
@@ -183,8 +193,8 @@ The earlier 8-layer OpenCL result was not representative of the final full-offlo
 
 ## Current operating decision
 
-- Keep Hermes STT and TTS on xAI while this runtime remains experimental.
-- Do not reactivate or depend on the retired standalone Whisper installation.
+- Run production Hermes STT on KoboldCpp Base.en Q5_1 and TTS on Kokoro Q4 with `af_heart`.
+- Do not modify the repaired standalone `whisper.cpp` installation while developing or deploying KoboldCpp.
 - Run the preferred Gemma 4 E4B model with all 43 layers on Adreno OpenCL by default.
 - Use HTP for compatible dense GGUF graphs only after a model-specific correctness and latency gate.
 - Use OpenCL for the Qwen3-TTS vocoder; do not offload its autoregressive transformer.

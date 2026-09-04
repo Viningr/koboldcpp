@@ -1,0 +1,111 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -eu
+
+APP="${KCPP_TEST_APP:-$HOME/.local/opt/koboldcpp-snapdragon}"
+BASE_CONFIG="${KCPP_BASE_CONFIG:-$HOME/.config/koboldcpp/gemma4-e4b-opencl.kcpps}"
+MODEL="${KCPP_WHISPER_MODEL:-$HOME/.local/share/models/koboldcpp/stt/whisper-base.en-q5_1.bin}"
+AUDIO="${KCPP_TEST_AUDIO:-$HOME/.local/state/koboldcpp-snapdragon/stt-tts-smoke-f16.wav}"
+PORT="${KCPP_TEST_PORT:-5002}"
+EXPECTED="${KCPP_EXPECTED_TEXT:-the hardware speech test day is working}"
+STATE="$HOME/.local/state/koboldcpp-whisper-q5_1-test"
+CONFIG="$STATE/test.kcpps"
+LOG="$STATE/server.log"
+PID=""
+
+cleanup() {
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        kill "$PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -9 "$PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+for path in "$APP/koboldcpp.py" "$APP/koboldcpp_default.so" "$BASE_CONFIG" "$MODEL" "$AUDIO"; do
+    [ -f "$path" ] || { printf 'missing prerequisite: %s\n' "$path" >&2; exit 2; }
+done
+
+mkdir -p "$STATE"
+python - "$BASE_CONFIG" "$CONFIG" "$MODEL" "$PORT" <<'PY'
+import json, sys
+src, dst, model, port = sys.argv[1:]
+with open(src, encoding="utf-8") as f:
+    cfg = json.load(f)
+cfg.update({
+    "model": [],
+    "model_param": "",
+    "whispermodel": model,
+    "ttsmodel": "",
+    "port": int(port),
+    "port_param": int(port),
+    "host": "127.0.0.1",
+    "device": "GPUOpenCL",
+    "debugmode": 1,
+})
+with open(dst, "w", encoding="utf-8") as f:
+    json.dump(cfg, f)
+PY
+
+cd "$APP" || exit 2
+rm -f "$LOG"
+nohup env \
+    LD_LIBRARY_PATH="$APP:$PREFIX/opt/vendor/lib:$HOME/.local/opt/llama-htp-sm8850/lib" \
+    ADSP_LIBRARY_PATH="$HOME/.local/opt/llama-htp-sm8850/lib" \
+    GGML_HEXAGON_DEVICES="HTP0:0" \
+    GGML_HEXAGON_HOSTBUF=0 \
+    GGML_OPENCL_KERNEL_CACHE_DIR="$HOME/.cache/koboldcpp/opencl" \
+    python koboldcpp.py --config "$CONFIG" >"$LOG" 2>&1 </dev/null &
+PID=$!
+printf 'pid=%s\n' "$PID"
+
+READY=0
+for _ in $(seq 1 90); do
+    if curl -fsS "http://127.0.0.1:$PORT/api/v1/model" >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    if ! kill -0 "$PID" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+if [ "$READY" -ne 1 ]; then
+    printf 'server did not become ready\n' >&2
+    python - "$LOG" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).read_text(errors="replace")[-12000:])
+PY
+    exit 1
+fi
+
+START=$(date +%s)
+BODY=$(curl -sS -F "file=@$AUDIO;type=audio/wav" -F model=whisper-1 "http://127.0.0.1:$PORT/v1/audio/transcriptions")
+CURL_RC=$?
+END=$(date +%s)
+printf 'curl_rc=%s elapsed=%ss response=%s\n' "$CURL_RC" "$((END-START))" "$BODY"
+if [ "$CURL_RC" -ne 0 ] || ! kill -0 "$PID" 2>/dev/null; then
+    printf 'transcription request crashed or disconnected from the server\n' >&2
+    python - "$LOG" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).read_text(errors="replace")[-12000:])
+PY
+    exit 1
+fi
+
+python - "$BODY" "$EXPECTED" <<'PY'
+import json, re, sys
+body, expected = sys.argv[1:]
+text = json.loads(body).get("text", "")
+normalize = lambda s: re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+print("text=" + text.strip())
+if normalize(expected) not in normalize(text):
+    raise SystemExit(f"unexpected transcript: {text!r}")
+PY
+
+curl -fsS "http://127.0.0.1:$PORT/api/v1/model" >/dev/null
+printf 'q5_1_opencl_transcription=pass\n'

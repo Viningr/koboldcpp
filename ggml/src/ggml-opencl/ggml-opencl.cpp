@@ -756,7 +756,7 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_soft_max, kernel_soft_max_4;
     cl_kernel kernel_soft_max_f16, kernel_soft_max_4_f16;
     ggml_opencl_fa_kernels fa;
-    cl_kernel kernel_get_rows_f32, kernel_get_rows_f16, kernel_get_rows_q4_0;
+    cl_kernel kernel_get_rows_f32, kernel_get_rows_f16, kernel_get_rows_q4_0, kernel_get_rows_q5_1, kernel_get_rows_q5_1_soa;
     cl_kernel kernel_set_rows_f32_i64, kernel_set_rows_f32_i32, kernel_set_rows_f16_i64, kernel_set_rows_f16_i32;
     cl_kernel kernel_set_rows_q8_0_i64, kernel_set_rows_q8_0_i32;
     cl_kernel kernel_set_rows_q8_0_soa_i64, kernel_set_rows_q8_0_soa_i32;
@@ -1629,6 +1629,8 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_CHECK((backend_ctx->kernel_get_rows_f32  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f32", &err), err));
         CL_CHECK((backend_ctx->kernel_get_rows_f16  = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_f16", &err), err));
         CL_CHECK((backend_ctx->kernel_get_rows_q4_0 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_q4_0", &err), err));
+        CL_CHECK((backend_ctx->kernel_get_rows_q5_1 = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_q5_1", &err), err));
+        CL_CHECK((backend_ctx->kernel_get_rows_q5_1_soa = clCreateKernel(backend_ctx->program_get_rows, "kernel_get_rows_q5_1_soa", &err), err));
         GGML_LOG_CONT(".");
     }
 
@@ -6475,6 +6477,12 @@ struct ggml_tensor_extra_cl_q5_0 {
     }
 };
 
+enum class ggml_opencl_q5_1_layout : uint8_t {
+    generic,
+    adreno_transposed,
+    adreno_moe_trans4_ns,
+};
+
 struct ggml_tensor_extra_cl_q5_1 {
     // Quantized values.
     cl_mem qs = nullptr;
@@ -6500,6 +6508,11 @@ struct ggml_tensor_extra_cl_q5_1 {
     size_t size_d = 0;
     // Size of min values.
     size_t size_m = 0;
+    // Physical SOA layout selected when the parent tensor was uploaded.
+    ggml_opencl_q5_1_layout layout = ggml_opencl_q5_1_layout::generic;
+    // Parent dimensions used to validate views of the Adreno-transposed layout.
+    int64_t physical_ne00 = 0;
+    int64_t physical_ne01 = 0;
 
     ~ggml_tensor_extra_cl_q5_1() {
         reset();
@@ -6538,6 +6551,9 @@ struct ggml_tensor_extra_cl_q5_1 {
         size_qh = 0;
         size_d = 0;
         size_m = 0;
+        layout = ggml_opencl_q5_1_layout::generic;
+        physical_ne00 = 0;
+        physical_ne01 = 0;
     }
 };
 
@@ -7593,6 +7609,33 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
 #else // GGML_OPENCL_SOA_Q
                     return true;
 #endif // GGML_OPENCL_SOA_Q
+                case GGML_TYPE_Q5_1:
+#ifdef GGML_OPENCL_SOA_Q
+                    if (op->src[0]->extra == nullptr) {
+                        return false;
+                    }
+                    {
+                        const ggml_tensor_extra_cl_q5_1 * extra =
+                            (const ggml_tensor_extra_cl_q5_1 *) op->src[0]->extra;
+                        if (extra->layout == ggml_opencl_q5_1_layout::adreno_moe_trans4_ns) {
+                            return false;
+                        }
+                        if (extra->layout == ggml_opencl_q5_1_layout::adreno_transposed) {
+                            return op->src[0]->view_offs == 0
+                                && extra->physical_ne00 == op->src[0]->ne[0]
+                                && extra->physical_ne01 == op->src[0]->ne[1]
+                                && op->src[0]->ne[2] == 1
+                                && op->src[0]->ne[3] == 1
+                                && ggml_is_contiguous(op->src[0]);
+                        }
+                        return extra->physical_ne00 > 0
+                            && extra->physical_ne01 > 0
+                            && op->src[0]->ne[0] % ggml_blck_size(GGML_TYPE_Q5_1) == 0
+                            && op->src[0]->view_offs % ggml_type_size(GGML_TYPE_Q5_1) == 0;
+                    }
+#else
+                    return true;
+#endif
                 default:
                     return false;
             }
@@ -9026,6 +9069,8 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
         // Allocate the new extra and create aliases from the original.
         ggml_backend_opencl_buffer_context * ctx = (ggml_backend_opencl_buffer_context *) buffer->context;
         ggml_tensor_extra_cl_q5_1 * extra = ctx->ggml_opencl_alloc_temp_tensor_extra_q5_1();
+        extra->physical_ne00 = tensor->ne[0];
+        extra->physical_ne01 = tensor->ne[1];
 
         size_t size_d = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
         size_t size_m = ggml_nelements(tensor)/ggml_blck_size(tensor->type)*sizeof(ggml_fp16_t);
@@ -9113,6 +9158,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
                 { extra->qs }
             };
             extra->qs_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_format_qs, &img_desc_qs, NULL, &err);
+            extra->layout = ggml_opencl_q5_1_layout::adreno_moe_trans4_ns;
             tensor->extra = extra;
 
             return;
@@ -9151,6 +9197,7 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
             // Transpose m as ushort
             transpose_2d_as_16b(backend_ctx, extra->m, extra->m, size_m, K/32, M);
 
+            extra->layout = ggml_opencl_q5_1_layout::adreno_transposed;
             return;
         }
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
@@ -11702,15 +11749,75 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
 
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
-    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
     ggml_tensor_extra_cl * extrad = (ggml_tensor_extra_cl *)dst->extra;
 
-    cl_ulong offset0 = extra0->offset + src0->view_offs;
     cl_ulong offset1 = extra1->offset + src1->view_offs;
     cl_ulong offsetd = extrad->offset + dst->view_offs;
 
     cl_kernel kernel;
+
+#ifdef GGML_OPENCL_SOA_Q
+    if (src0->type == GGML_TYPE_Q5_1) {
+        ggml_tensor_extra_cl_q5_1 * extra0_q5_1 = (ggml_tensor_extra_cl_q5_1 *) src0->extra;
+        kernel = backend_ctx->kernel_get_rows_q5_1_soa;
+
+        const int64_t q5_1_block_size = ggml_blck_size(GGML_TYPE_Q5_1);
+        const size_t q5_1_type_size = ggml_type_size(GGML_TYPE_Q5_1);
+        GGML_ASSERT(ne00 % q5_1_block_size == 0);
+        GGML_ASSERT(src0->view_offs % q5_1_type_size == 0);
+        GGML_ASSERT(extra0_q5_1->layout != ggml_opencl_q5_1_layout::adreno_moe_trans4_ns);
+        GGML_ASSERT(extra0_q5_1->physical_ne00 > 0);
+        GGML_ASSERT(extra0_q5_1->physical_ne01 > 0 && extra0_q5_1->physical_ne01 <= INT32_MAX);
+
+        cl_ulong src0_block_offset = src0->view_offs / q5_1_type_size;
+        int transposed = extra0_q5_1->layout == ggml_opencl_q5_1_layout::adreno_transposed ? 1 : 0;
+        int physical_ne01 = (int) extra0_q5_1->physical_ne01;
+        GGML_ASSERT(!transposed || (src0_block_offset == 0
+            && extra0_q5_1->physical_ne00 == ne00
+            && extra0_q5_1->physical_ne01 == ne01
+            && ne02 == 1
+            && ne03 == 1
+            && ggml_is_contiguous(src0)));
+
+        CL_CHECK(clSetKernelArg(kernel,  0, sizeof(cl_mem),   &extra0_q5_1->qs));
+        CL_CHECK(clSetKernelArg(kernel,  1, sizeof(cl_mem),   &extra0_q5_1->qh));
+        CL_CHECK(clSetKernelArg(kernel,  2, sizeof(cl_mem),   &extra0_q5_1->d));
+        CL_CHECK(clSetKernelArg(kernel,  3, sizeof(cl_mem),   &extra0_q5_1->m));
+        CL_CHECK(clSetKernelArg(kernel,  4, sizeof(cl_ulong), &src0_block_offset));
+        CL_CHECK(clSetKernelArg(kernel,  5, sizeof(cl_mem),   &extra1->data_device));
+        CL_CHECK(clSetKernelArg(kernel,  6, sizeof(cl_ulong), &offset1));
+        CL_CHECK(clSetKernelArg(kernel,  7, sizeof(cl_mem),   &extrad->data_device));
+        CL_CHECK(clSetKernelArg(kernel,  8, sizeof(cl_ulong), &offsetd));
+        CL_CHECK(clSetKernelArg(kernel,  9, sizeof(int),      &ne00));
+        CL_CHECK(clSetKernelArg(kernel, 10, sizeof(cl_ulong), &nb01));
+        CL_CHECK(clSetKernelArg(kernel, 11, sizeof(cl_ulong), &nb02));
+        CL_CHECK(clSetKernelArg(kernel, 12, sizeof(cl_ulong), &nb03));
+        CL_CHECK(clSetKernelArg(kernel, 13, sizeof(int),      &ne10));
+        CL_CHECK(clSetKernelArg(kernel, 14, sizeof(cl_ulong), &nb10));
+        CL_CHECK(clSetKernelArg(kernel, 15, sizeof(cl_ulong), &nb11));
+        CL_CHECK(clSetKernelArg(kernel, 16, sizeof(cl_ulong), &nb12));
+        CL_CHECK(clSetKernelArg(kernel, 17, sizeof(cl_ulong), &nb1));
+        CL_CHECK(clSetKernelArg(kernel, 18, sizeof(cl_ulong), &nb2));
+        CL_CHECK(clSetKernelArg(kernel, 19, sizeof(cl_ulong), &nb3));
+        CL_CHECK(clSetKernelArg(kernel, 20, sizeof(int),      &physical_ne01));
+        CL_CHECK(clSetKernelArg(kernel, 21, sizeof(int),      &transposed));
+
+        int max_workgroup_size = backend_ctx->get_kernel_workgroup_size(kernel);
+        int nth = 1;
+        while (nth < ne00 && 2*nth <= max_workgroup_size) {
+            nth *= 2;
+        }
+
+        size_t global_work_size[] = {(size_t)ne10*nth, (size_t)ne11, (size_t)ne12};
+        size_t local_work_size[] = {(size_t)nth, 1, 1};
+        backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+        return;
+    }
+#endif
+
+    ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
+    cl_ulong offset0 = extra0->offset + src0->view_offs;
 
     switch (src0->type) {
         case GGML_TYPE_F32:
@@ -11721,6 +11828,9 @@ static void ggml_cl_get_rows(ggml_backend_t backend, const ggml_tensor * src0, c
             break;
         case GGML_TYPE_Q4_0:
             kernel = backend_ctx->kernel_get_rows_q4_0;
+            break;
+        case GGML_TYPE_Q5_1:
+            kernel = backend_ctx->kernel_get_rows_q5_1;
             break;
         default:
             GGML_ASSERT(false && "not implemented");
