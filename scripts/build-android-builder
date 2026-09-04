@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+# shellcheck disable=SC1091
+. "$ROOT/containers/android-builder/requirements.env"
+
+if ! docker version >/dev/null 2>&1; then
+    echo "Docker Desktop is not reachable; start or repair it before building." >&2
+    exit 1
+fi
+
+docker build \
+    --pull \
+    --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+    --build-arg "MAKE_DEBIAN_VERSION=$MAKE_DEBIAN_VERSION" \
+    --tag "$BUILDER_IMAGE" \
+    --file "$ROOT/containers/android-builder/Dockerfile" \
+    "$ROOT/containers/android-builder"
+
+docker run --rm \
+    -e "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" \
+    -e "ANDROID_API=$ANDROID_API" \
+    -e "HEXAGON_SDK_ROOT=$HEXAGON_SDK_ROOT" \
+    "$BUILDER_IMAGE" \
+    bash -lc '
+        set -euo pipefail
+        cc="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
+        test -x "$cc"
+        test -d "$HEXAGON_SDK_ROOT/incs"
+        make --version
+        "$cc" --version
+        printf "ANDROID_NDK_ROOT=%s\nANDROID_API=%s\nHEXAGON_SDK_ROOT=%s\n" \
+            "$ANDROID_NDK_ROOT" "$ANDROID_API" "$HEXAGON_SDK_ROOT"
+    '
+
+docker image inspect "$BUILDER_IMAGE" \
+    --format 'builder={{.RepoTags}} id={{.Id}} created={{.Created}}'

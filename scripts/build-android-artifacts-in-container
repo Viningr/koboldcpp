@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${ANDROID_NDK_ROOT:?ANDROID_NDK_ROOT is required}"
+: "${ANDROID_API:?ANDROID_API is required}"
+: "${HEXAGON_SDK_ROOT:?HEXAGON_SDK_ROOT is required}"
+
+TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+CC="$TC/aarch64-linux-android${ANDROID_API}-clang"
+CXX="$TC/aarch64-linux-android${ANDROID_API}-clang++"
+AR="$TC/llvm-ar"
+
+for prerequisite in "$CC" "$CXX" "$AR"; do
+    test -x "$prerequisite" || {
+        echo "Missing executable: $prerequisite" >&2
+        exit 1
+    }
+done
+
+test -d "$HEXAGON_SDK_ROOT/incs" || {
+    echo "Missing Hexagon SDK: $HEXAGON_SDK_ROOT" >&2
+    exit 1
+}
+
+COMMON=(
+    LLAMA_PORTABLE=1
+    LLAMA_NOAVX=1
+    LLAMA_NOAVX2=1
+    LLAMA_NOAVX512=1
+    LLAMA_NOFMA=1
+    UNAME_S=Linux
+    UNAME_M=aarch64
+    UNAME_P=aarch64
+    UNAME_O=Android
+    "CC=$CC"
+    "CXX=$CXX"
+    "AR=$AR"
+)
+
+if (( $# )); then
+    TARGETS=("$@")
+else
+    TARGETS=(mainsnapdragon qwen3ttssnapdragon koboldcpp_snapdragon)
+fi
+
+make "${COMMON[@]}" clean
+make -j"${BUILD_JOBS:-8}" "${COMMON[@]}" "${TARGETS[@]}"
+
+for artifact in mainsnapdragon qwen3ttssnapdragon koboldcpp_snapdragon.so; do
+    if [[ -f "$artifact" ]]; then
+        sha256sum "$artifact"
+    fi
+done

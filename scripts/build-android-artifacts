@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+# shellcheck disable=SC1091
+. "$ROOT/containers/android-builder/requirements.env"
+
+if ! docker image inspect "$BUILDER_IMAGE" >/dev/null 2>&1; then
+    echo "Missing $BUILDER_IMAGE; run scripts/build-android-builder first." >&2
+    exit 1
+fi
+
+ROOT_NATIVE="$(cd "$ROOT" && pwd -W 2>/dev/null || pwd)"
+
+docker run --rm \
+    -e "BUILD_JOBS=${BUILD_JOBS:-8}" \
+    -e "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" \
+    -e "ANDROID_API=$ANDROID_API" \
+    -e "HEXAGON_SDK_ROOT=$HEXAGON_SDK_ROOT" \
+    -v "$ROOT_NATIVE:/src" \
+    -w /src \
+    "$BUILDER_IMAGE" \
+    bash scripts/build-android-artifacts-in-container "$@"

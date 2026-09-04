@@ -6,31 +6,34 @@ This branch is an experimental Android/Termux port of the current llama.cpp Open
 
 - KoboldCpp base: `4ac5721b5eb7c5f51216a7839929318b65fd9951` (`LostRuins/koboldcpp`, branch base for this work)
 - Imported llama.cpp backend source: `0f3a71be15af836d277c9f918adfafb45732677e`
-- Builder image: `kcpp-android-builder:v0.7`
-- Builder image ID: `sha256:e2ebf75d43b604755ef47c577a93488fa898e8d82708c76f0e60c0114182479b`
+- Builder image: `kcpp-android-builder:v0.7`, recreated by `scripts/build-android-builder`
+- Builder definition: `containers/android-builder/Dockerfile`
+- Pinned base image: `ghcr.io/snapdragon-toolchain/arm64-android:v0.7@sha256:91714433626f0d94a926538a1e46ec43756c5b8e3262b91b95df1e812940aed1`
+- Original verified builder image ID: `sha256:e2ebf75d43b604755ef47c577a93488fa898e8d82708c76f0e60c0114182479b`
 - Android NDK: r29, API 35
 - Qualcomm Hexagon SDK: 6.6.0.0, tools 19.0.07
+- GNU Make Debian package: `4.4.1-2`
+
+The complete machine-readable toolchain contract is in `containers/android-builder/requirements.env`. The pinned base image contains the Android NDK and Qualcomm Hexagon SDK; the repository-owned Dockerfile adds only the missing build prerequisite.
 
 For upstream `scripts/snapdragon/run.py` on Windows, prepend `C:/tools/platform-tools` to `PATH`. The script launches `adb` by executable name even when an enclosing shell command used an absolute `adb.exe` path; without that PATH entry, it fails locally with `FileNotFoundError: [WinError 2]` before contacting the phone.
 
 ## Build
 
-Run from the repository root on the Windows build host:
+Run from the repository root on the Windows build host. The first command recreates and validates the pinned builder image; the second performs a clean Android AArch64 build:
 
 ```bash
-docker run --rm \
-  -v C:/repos/koboldcpp-snapdragon:/src \
-  -w /src \
-  kcpp-android-builder:v0.7 \
-  bash -lc '
-    set -e
-    TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
-    COMMON="LLAMA_PORTABLE=1 UNAME_S=Linux UNAME_M=aarch64 UNAME_P=aarch64 UNAME_O=Android CC=$TC/aarch64-linux-android35-clang CXX=$TC/aarch64-linux-android35-clang++ AR=$TC/llvm-ar"
-    make $COMMON clean
-    make -j8 $COMMON mainsnapdragon qwen3ttssnapdragon koboldcpp_snapdragon
-  '
+scripts/build-android-builder
+scripts/build-android-artifacts
 ```
 
+`BUILD_JOBS` may override the default parallelism of 8. Explicit make targets may be passed to the artifact script, for example:
+
+```bash
+BUILD_JOBS=4 scripts/build-android-artifacts koboldcpp_snapdragon
+```
+
+The host script mounts the current Git worktree at `/src`; it does not depend on a fixed `C:/repos/...` checkout path. The in-container script validates the NDK compiler, archiver, and Hexagon SDK before running `make clean`. It prints SHA-256 checksums for every requested standard deliverable that exists.
 The compiled deliverables are:
 
 - `mainsnapdragon`: llama-compatible CLI with CPU, OpenCL, and HTP registered together.
