@@ -1,0 +1,4 @@
+# Shell scripts execute in Linux/Termux containers even when checked out on Windows.
+/scripts/* text eol=lf
+/containers/android-builder/Dockerfile text eol=lf
+/containers/android-builder/*.env text eol=lf
