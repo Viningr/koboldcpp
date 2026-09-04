@@ -87,7 +87,7 @@ The deployed service consists of:
 - `~/.local/bin/koboldcpp-snapdragon-run`
 - `~/.local/bin/koboldcpp-snapdragon-service`
 
-The runner contains only the runtime-isolation contract and loads settings from the `.kcpps` file. `KCPP_CONFIG` may select another `.kcpps` profile. The default profile runs Gemma 4 E4B with a 16,384-token context on `GPUOpenCL`, with all 43 model layers offloaded. It also loads `whisper-base.en-f16.bin` in the embedded STT slot and `Kokoro_no_espeak_Q4.gguf` in the TTS slot; `embd_res/kokoro_ipa.embd` must be installed beside the runtime. Base.en uses the F16 Whisper file because the OpenCL backend's `GET_ROWS` path supports F16 but not the Q5_1 embedding type. The service manager supports `start`, `stop`, `restart`, `status`, and `log`; its PID and log live under `~/.local/state/koboldcpp-snapdragon/`. It uses `nohup` so the service survives the SSH session, and the runner forwards termination to the Python server and releases its Termux wake lock.
+The runner contains only the runtime-isolation contract and loads settings from the `.kcpps` file. `KCPP_CONFIG` may select another `.kcpps` profile. The default profile runs Gemma 4 E4B with a 16,384-token context on `GPUOpenCL`, with all 43 model layers offloaded. It loads the proven `whisper-base.en-f16.bin` in the embedded STT slot and `Kokoro_no_espeak_Q4.gguf` in the TTS slot; `embd_res/kokoro_ipa.embd` must be installed beside the runtime. The service manager supports `start`, `stop`, `restart`, `status`, and `log`; its PID and log live under `~/.local/state/koboldcpp-snapdragon/`. It uses `nohup` so the service survives the SSH session, and the runner forwards termination to the Python server and releases its Termux wake lock. This is session persistence, not boot persistence: no Termux:Boot, `runit`, shell-startup, or cron entry currently starts KoboldCpp after an Android reboot.
 
 The installed combined service was verified through the HTTP API on all relevant paths:
 
@@ -95,10 +95,25 @@ The installed combined service was verified through the HTTP API on all relevant
 - HTP: the same service opened a Hexagon v81 session, enumerated OpenCL/HTP/RPC/CPU, offloaded one layer to `HTP0:0`, and returned HTTP JSON.
 - Preferred E4B: the service loaded the abliterated E4B model with `GPUOpenCL`, identified the physical `QUALCOMM Adreno(TM) 840`, and reported `offloaded 43/43 layers to GPU`. `/api/v1/generate` returned HTTP 200 with `FULL_OFFLOAD_OK`.
 - Embedded TTS: Kokoro Q4 produced a valid mono 24 kHz WAV through `/v1/audio/speech`.
-- Embedded STT: OpenCL Base.en transcribed that WAV through `/v1/audio/transcriptions`; the service remained running after inference.
+- Embedded STT: OpenCL Base.en F16 transcribed that WAV through `/v1/audio/transcriptions`; the service remained running after inference.
 - KoboldAI Lite: `/` returned HTTP 200 with the complete 1,759,957-byte embedded UI.
 
 The persistent instance listens only on `127.0.0.1:5001`; its `.kcpps` profile sets a 16,384-token context and full E4B offload on Adreno OpenCL. The fixed-output API smoke test proves launchability, full layer placement, and basic deterministic generation; it does not by itself establish broad model-quality equivalence.
+
+## Whisper Base.en Q4_0 OpenCL limitation
+
+The legacy `ggml-base.en-q4_0.bin` artifact is valid, but it must not be selected in the production Snapdragon build. Controlled tests used the same PCM WAV and model file:
+
+| Backend/build | Result | Elapsed |
+|---|---|---:|
+| CPU | `The hardware speech test day is working.` | 3 s |
+| Production OpenCL, SOA + Adreno kernels | empty transcript | 2 s |
+| OpenCL, SOA + generic kernels | empty transcript | 4 s |
+| Diagnostic OpenCL, AOS + generic kernels | `The hardware speech test day is working.` | 4 s |
+
+This isolates the semantic failure to the OpenCL struct-of-arrays quantized-weight path enabled by `GGML_OPENCL_SOA_Q`, not the model conversion, HTTP endpoint, Hermes adapter, audio normalization, Qualcomm OpenCL driver, or Adreno-specialized kernels. The response remains valid HTTP JSON (`{"text": ""}`), so Hermes treats it as silence and immediately resumes listening.
+
+The diagnostic AOS build required compile guards around SOA-only optimized code and is not a production replacement: disabling SOA globally also changes the quantized Gemma path. Keep Whisper Base.en F16 active until the Q4_0 SOA upload/layout path is corrected and validated without regressing Gemma.
 
 ## HTP proof
 

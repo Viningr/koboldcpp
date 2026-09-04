@@ -1,0 +1,64 @@
+#!/data/data/com.termux/files/usr/bin/python
+import json
+import os
+import sys
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+ENDPOINT = "http://127.0.0.1:5001/v1/audio/speech"
+LOG_PATH = Path.home() / ".local/state/koboldcpp-snapdragon/hermes-tts.log"
+
+
+def log_event(**fields: object) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    record = {"timestamp": datetime.now(timezone.utc).isoformat(), **fields}
+    with LOG_PATH.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def fail(message: str, *, voice: str = "") -> None:
+    log_event(endpoint=ENDPOINT, voice=voice, success=False, error=message)
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def main() -> None:
+    if len(sys.argv) < 4:
+        fail("usage: hermes-koboldcpp-tts TEXT_FILE OUTPUT_FILE VOICE")
+
+    text_path = Path(sys.argv[1])
+    output_path = Path(sys.argv[2])
+    voice = sys.argv[3].strip() or "bf_isabella"
+    text = text_path.read_text(encoding="utf-8").strip()
+    if not text:
+        fail("input text is empty", voice=voice)
+
+    payload = json.dumps(
+        {
+            "input": text,
+            "voice": voice,
+            "response_format": "wav",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        ENDPOINT,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=180) as response:
+        audio = response.read()
+
+    if len(audio) < 44 or not audio.startswith(b"RIFF") or audio[8:12] != b"WAVE":
+        fail("KoboldCpp returned invalid WAV audio", voice=voice)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(output_path.name + ".part")
+    temporary.write_bytes(audio)
+    os.replace(temporary, output_path)
+    log_event(endpoint=ENDPOINT, voice=voice, success=True, bytes=len(audio))
+
+
+if __name__ == "__main__":
+    main()

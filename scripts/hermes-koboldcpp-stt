@@ -1,0 +1,42 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+
+readonly endpoint="http://127.0.0.1:5001/v1/audio/transcriptions"
+readonly input_path="${1:?usage: hermes-koboldcpp-stt AUDIO_FILE}"
+readonly ffmpeg_bin="/data/data/com.termux/files/usr/bin/ffmpeg"
+readonly curl_bin="/data/data/com.termux/files/usr/bin/curl"
+readonly python_bin="/data/data/com.termux/files/usr/bin/python"
+readonly temp_wav="$(mktemp "${TMPDIR:-/data/data/com.termux/files/usr/tmp}/hermes-koboldcpp-stt.XXXXXX.wav")"
+trap 'rm -f "$temp_wav"' EXIT
+
+"$ffmpeg_bin" \
+  -nostdin \
+  -hide_banner \
+  -loglevel error \
+  -y \
+  -i "$input_path" \
+  -vn \
+  -ac 1 \
+  -ar 16000 \
+  -c:a pcm_s16le \
+  "$temp_wav"
+
+response="$("$curl_bin" \
+  --fail-with-body \
+  --silent \
+  --show-error \
+  --max-time 180 \
+  --form "file=@${temp_wav};type=audio/wav" \
+  --form 'model=whisper-1' \
+  "$endpoint")"
+
+"$python_bin" -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+text = str(payload.get("text", "")).strip()
+if not text:
+    raise SystemExit("KoboldCpp returned an empty transcript")
+sys.stdout.write(text)
+' <<<"$response"
